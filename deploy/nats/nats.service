@@ -1,0 +1,22 @@
+[Unit]
+Description=NATS single node - шина сообщений агентов sigma-mate
+Documentation=https://docs.nats.io/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nats
+Group=nats
+ExecStart=/usr/local/bin/nats-server -c /etc/nats/nats-server.conf
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=3
+# Никаких данных на диск - plain NATS без JetStream
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

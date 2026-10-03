@@ -51,3 +51,5 @@ bundle exec rspec
 - `bin/ask` - CLI-обвязка: вопрос -> pi-агент -> ответ
 - `agents/developer.md` - инструкции сотрудника developer
 - `backlog/` - трекер задач (Backlog.md)
+- `deploy/nats/` - конфигурация NATS-шины сообщений агентов
+  (параметры и управление - `backlog/docs/doc-2 - Шина-сообщений-NATS.md`)
