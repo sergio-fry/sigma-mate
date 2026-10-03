@@ -7,13 +7,9 @@
 require "rubygems"
 require "bundler/setup"
 
-require "pi_agent"
+require_relative "../lib/sigma_mate"
 
 module SigmaMate
-  AGENT_NAME = "developer"
-  AGENT_FILE = File.expand_path("../agents/#{AGENT_NAME}.md", __dir__)
-  PROJECT_ROOT = File.expand_path("..", __dir__)
-
   EXIT_OK = 0
   EXIT_FAILURE = 1
   EXIT_USAGE = 2
@@ -49,10 +45,7 @@ module SigmaMate
 
   # Спрашивает агента developer и возвращает текст ответа.
   def ask(question)
-    session = PiAgent.session(
-      args: ["--mode", "rpc", "--append-system-prompt", AGENT_FILE],
-      cwd: PROJECT_ROOT
-    )
+    session = default_session_factory.call
     begin
       session.run(question).to_s
     ensure

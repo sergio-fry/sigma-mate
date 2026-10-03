@@ -1,0 +1,83 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# sigma-mate сервис агента developer: держит pi-сессию открытой и
+# обслуживает POST /ask {"prompt": "..."} -> ответ агента в ответе того же
+# запроса. Новый запрос прерывает текущий прогон. Адрес и порт:
+# --host/--port или SM_HOST/SM_PORT (по умолчанию 127.0.0.1:4567).
+
+require "rubygems"
+require "bundler/setup"
+
+require_relative "../lib/sigma_mate"
+require_relative "../lib/sigma_mate/coordinator"
+require_relative "../lib/sigma_mate/service"
+
+module SigmaMate
+  EXIT_OK = 0
+  EXIT_FAILURE = 1
+
+  module_function
+
+  def usage
+    "Использование: bin/serve [--host АДРЕС] [--port ПОРТ]\n" \
+      "Адрес и порт: --host/--port или переменные SM_HOST/SM_PORT " \
+      "(по умолчанию #{DEFAULT_HOST}:#{DEFAULT_PORT})"
+  end
+
+  # @return [Array<String host, Integer port>]
+  def options(argv)
+    host = ENV.fetch("SM_HOST", DEFAULT_HOST)
+    port = ENV.fetch("SM_PORT", DEFAULT_PORT.to_s)
+    args = argv.dup
+    until args.empty?
+      case args.shift
+      when "--host" then host = args.shift.to_s
+      when "--port" then port = args.shift.to_s
+      when "--help", "-h"
+        puts usage
+        exit EXIT_OK
+      else
+        warn usage
+        exit EXIT_FAILURE
+      end
+    end
+    port = port.to_i
+    [host, port]
+  rescue ArgumentError
+    warn "Некорректный порт."
+    warn usage
+    exit EXIT_FAILURE
+  end
+
+  def run(argv)
+    host, port = options(argv)
+
+    coordinator = Coordinator.new(session_factory: default_session_factory)
+    coordinator.start
+    unless coordinator.alive?
+      warn "Предупреждение: pi-сессия не поднялась (#{coordinator.session_error})."
+      warn "Сервис продолжит работать и будет отвечать ошибкой 503 на запросы."
+    end
+
+    service = Service.new(coordinator: coordinator, host: host, port: port)
+
+    %w[INT TERM].each do |sig|
+      trap(sig) { service.shutdown }
+    end
+
+    puts "Sigma Mate сервис агента #{AGENT_NAME}: http://#{host}:#{port} (POST /ask)"
+    $stdout.flush
+
+    service.start
+    coordinator.close
+    EXIT_OK
+  rescue Errno::EADDRINUSE => e
+    warn "Ошибка: адрес #{host}:#{port} занят. #{e.message}"
+    EXIT_FAILURE
+  end
+end
+
+if $PROGRAM_NAME == __FILE__
+  exit SigmaMate.run(ARGV)
+end
