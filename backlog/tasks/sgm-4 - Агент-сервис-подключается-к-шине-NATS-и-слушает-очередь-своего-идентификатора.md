@@ -1,10 +1,11 @@
 ---
 id: SGM-4
 title: Агент-сервис подключается к шине NATS и слушает очередь своего идентификатора
-status: To Do
+status: In Progress
 assignee:
-  - developer
+  - '@developer'
 created_date: '2026-10-03 10:24'
+updated_date: '2026-10-03 11:46'
 labels: []
 dependencies:
   - SGM-2
@@ -38,3 +39,26 @@ ordinal: 4000
 - [ ] #2 Есть автотест на подписку и приём сообщения без живой шины.
 - [ ] #3 Изменения закоммичены, документация проекта и правила агентов актуальны.
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Gemfile: гем nats-pure (~> 2.6), официальный pure-Ruby клиент NATS; bundle install; свериться с API гема (reconnect-опции, subscribe).
+2. lib/sigma_mate/bus.rb: BusListener — подписка на шину в отдельном потоке. Поток с retry-циклом: NATS.connect по адресу из параметров, subscribe на subject = идентификатор агента; входящее сообщение целиком показывается в выводе сервиса (subject, reply-адрес при наличии, размер, payload). Обрыв/недоступность шины не роняет сервис: nats-pure авто-reconnect (max_reconnect_attempts: -1), при полном закрытии клиента поток переподключается с паузой. HTTP-API не трогается.
+3. bin/serve: параметры --agent-id и --nats-url (+ SM_AGENT_ID/SM_NATS_URL). Без идентификатора — ошибка в выводе, подписка не поднимается, сервис (HTTP) продолжает работать. Идентификатор есть, адреса шины нет — то же самое. Идентификатор есть и адрес есть — поднимается BusListener; остановка по сигналам чистая.
+4. spec/fake_nats.rb: минимальный TCP-сервер, говорящий на текстовом протоколе NATS (INFO/CONNECT/PING/PONG/SUB/PUB/MSG), с поддержкой остановки и повторного подъёма на тот же порт для теста обрыва связи.
+5. Тесты: spec/bus_spec.rb (BusListener против fake_nats: подключение, приём сообщения, переподключение после обрыва) + e2e в serve_spec: сервис с --agent-id/--nats-url — сообщение, опубликованное в очередь агента, видно в выводе сервиса; без --agent-id — ошибка и подписка не поднимается, HTTP при этом работает.
+6. README: раздел про шину — параметры запуска, адрес, формат строк лога.
+7. Живая проверка на реальной ноде nats://127.0.0.1:4222: поднять сервис с --agent-id developer, опубликовать сообщение в очередь через nats CLI, убедиться, что оно видно в выводе; обрыв (systemctl stop nats) — сервис и HTTP живы, после start — приём продолжается. Записать факт в заметки задачи.
+8. Сверка AC и DoD, финальное резюме, коммит.
+
+9. Уточнение при реализации: у nats-pure с max_reconnect_attempts: -1 неудачное первичное подключение никогда не возвращает управление из NATS.connect (внутренний бесконечный retry без логов), из-за этого 'шина недоступна' не видна и чистая остановка сервиса при недоступной шине невозможна. Итоговое решение: клиент подключается с reconnect: false, а вся политика переподключения - в цикле слушателя (пауза RETRY_DELAY, честный журнал, чистый stop).
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+BusListener (lib/sigma_mate/bus.rb): собственный поток, подключение к шине по адресу из параметров (в коде не зашит), подписка на subject = идентификатор агента, каждое входящее сообщение целиком в журнале (subject, размер, reply, payload). Политика переподключения - в цикле слушателя: клиент подключается с reconnect: false, неудача сразу видна в журнале ('шина недоступна ... повторная попытка'), обрыв закрывает клиент и цикл поднимает подписку заново с паузой; слушатель останавливается чисто даже при недоступной шине. bin/serve: --agent-id/--nats-url (+ SM_AGENT_ID/SM_NATS_URL), без идентификатора или адреса - ошибка, подписка не поднимается, HTTP работает.
+
+Живая проверка на реальной ноде nats://127.0.0.1:4222 (nats-server, systemd): сервис поднят с --agent-id developer --nats-url nats://127.0.0.1:4222. (1) 'nats pub developer ...' - сообщение видно в выводе: '[bus] developer <- incoming message (61 bytes): live check SGM-4: hello from the bus'. (2) systemctl stop nats: '[bus] connection to the bus lost (Errno::ECONNRESET)', далее ретраи '[bus] bus unavailable (Errno::ECONNREFUSED ...); retrying in 2.0 s'; процесс жив, HTTP отвечает (400 на некорректный POST /ask). (3) systemctl start nats: '[bus] subscription to queue developer raised', второе сообщение ('reception restored') принято. (4) SIGTERM - код выхода 0, чистая остановка. (5) Запуск без --agent-id: ошибка 'agent identifier not set ...; bus subscription not raised', в логе нет строк [bus], HTTP работает. Suite: bundle exec rspec - 22 examples, 0 failures (bus_spec 6, serve_spec e2e включительно).
+<!-- SECTION:NOTES:END -->
