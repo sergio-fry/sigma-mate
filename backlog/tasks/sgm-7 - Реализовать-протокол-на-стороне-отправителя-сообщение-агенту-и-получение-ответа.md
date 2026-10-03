@@ -7,12 +7,13 @@ status: To Do
 assignee:
   - developer
 created_date: '2026-10-03 10:24'
+updated_date: '2026-10-03 11:53'
 labels: []
 dependencies:
   - SGM-5
   - SGM-6
 documentation:
-  - backlog/docs/doc-1 - Sigma-Mate-замысел-проекта.md
+  - doc-3
 type: feature
 ordinal: 7000
 ---
