@@ -1,0 +1,66 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# sigma-mate прототип: запускает pi-агента developer, задаёт ему вопрос
+# и печатает ответ в stdout.
+
+require "rubygems"
+require "bundler/setup"
+
+require "pi_agent"
+
+module SigmaMate
+  AGENT_NAME = "developer"
+  AGENT_FILE = File.expand_path("../agents/#{AGENT_NAME}.md", __dir__)
+  PROJECT_ROOT = File.expand_path("..", __dir__)
+
+  EXIT_OK = 0
+  EXIT_FAILURE = 1
+  EXIT_USAGE = 2
+
+  module_function
+
+  # Запускает pi-агента с вопросом и печатает ответ.
+  # Возвращает код возврата процесса.
+  def run(argv)
+    question = argv.join(" ").to_s.strip
+    unless question.empty?
+      answer = ask(question)
+      puts answer.to_s
+      return EXIT_OK
+    end
+
+    warn "Не задан вопрос."
+    warn "Использование: bin/ask <текст вопроса>"
+    EXIT_USAGE
+  rescue PiAgent::BinaryNotFoundError => e
+    warn "Ошибка: не найден pi. #{e.message}"
+    EXIT_FAILURE
+  rescue PiAgent::TransportClosedError => e
+    warn "Ошибка: сессия pi-агента прервалась. #{e.message}"
+    EXIT_FAILURE
+  rescue PiAgent::CommandError => e
+    warn "Ошибка: pi отклонил команду#{e.command ? " (#{e.command})" : ''}. #{e.message}"
+    EXIT_FAILURE
+  rescue PiAgent::Error => e
+    warn "Ошибка взаимодействия с pi-агентом: #{e.message}"
+    EXIT_FAILURE
+  end
+
+  # Спрашивает агента developer и возвращает текст ответа.
+  def ask(question)
+    session = PiAgent.session(
+      args: ["--mode", "rpc", "--append-system-prompt", AGENT_FILE],
+      cwd: PROJECT_ROOT
+    )
+    begin
+      session.run(question).to_s
+    ensure
+      session.close
+    end
+  end
+end
+
+if $PROGRAM_NAME == __FILE__
+  exit SigmaMate.run(ARGV)
+end
