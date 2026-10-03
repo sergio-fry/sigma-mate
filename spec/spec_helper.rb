@@ -4,6 +4,7 @@ require "fileutils"
 require "tmpdir"
 require "open3"
 require "rbconfig"
+require "timeout"
 
 RSpec.configure do |config|
   config.order = :random

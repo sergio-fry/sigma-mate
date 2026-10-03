@@ -1,13 +1,17 @@
 # frozen_string_literal: true
 
 require "nats/client"
+require_relative "protocol"
 
 module SigmaMate
-  # Слушатель очереди агента на шине NATS. Транспортная часть: подключение
-  # по адресу из параметров запуска, подписка на subject = идентификатору
-  # агента и журнал - каждое входящее сообщение целиком показывается в
-  # выводе сервиса. Смысл сообщений и формат ответов задаёт протокол
-  # (SGM-5), здесь сообщение важно не потерять и честно показать.
+  # Слушатель очереди агента на шине NATS. Транспортная часть протокола
+  # (doc-3): подключение по адресу из параметров запуска, подписка на тему
+  # sigma.agent.<идентификатор>.inbox и журнал - каждое входящее сообщение
+  # видно в выводе сервиса. Смысл сообщений обрабатывает handler
+  # (AgentProtocol); без него слушатель только показывает сообщение
+  # (транспорт без протокола). Handler вызывается в потоке читателя шины и
+  # потому обязан не блокировать: обработка задачи уходит в собственный
+  # поток на стороне handler-а.
   #
   # Обрыв связи с шиной не роняет слушатель и не мешает HTTP-API: слушатель
   # живёт в собственном потоке, а вся политика переподключения - в его
@@ -23,11 +27,16 @@ module SigmaMate
     POLL_INTERVAL = 0.2
 
     # @param url [String] адрес шины, например "nats://127.0.0.1:4222"
-    # @param agent_id [String] идентификатор агента; он же - subject очереди
+    # @param agent_id [String] идентификатор агента; тема его очереди -
+    #   sigma.agent.<идентификатор>.inbox (doc-3)
     # @param io [IO] куда писать журнал (stdout сервиса)
-    def initialize(url:, agent_id:, io: $stdout)
+    # @param handler [#call, nil] вызывается для каждого входящего сообщения
+    #   (объект NATS-клиента с subject, reply, data); nil - только журнал
+    def initialize(url:, agent_id:, io: $stdout, handler: nil)
       @url = url
       @agent_id = agent_id
+      @subject = Protocol.inbox_subject(agent_id)
+      @handler = handler
       @io = io
       @mutex = Mutex.new
       @stop = false
@@ -35,7 +44,11 @@ module SigmaMate
       @thread = nil
     end
 
-    attr_reader :url, :agent_id
+    attr_reader :url, :agent_id, :subject
+
+    # Обработчик протокола (AgentProtocol); выставляется после создания
+    # слушателя, потому что обработчику сам слушатель нужен как издатель.
+    attr_accessor :handler
 
     # Поднимает поток слушателя и возвращается сразу (не блокируется).
     def start
@@ -66,6 +79,28 @@ module SigmaMate
     def connected?
       client = @mutex.synchronize { @client }
       !client.nil? && client.connected?
+    end
+
+    # Опубликовать сообщение в шину текущим клиентом. Используется для
+    # ответов протокола: reply публикуется событием в канал
+    # sigma.agent.<идентификатор>.events. Возвращает true при успехе; false,
+    # если шины сейчас нет (соединение потеряно и ещё не поднято) - в этом
+    # случае сообщение теряется (core NATS - at-most-once, doc-3) и это
+    # честно отмечается в журнале.
+    def publish(subject, payload)
+      client = @mutex.synchronize { @client }
+      if client.nil? || client.closed?
+        log_bus("не удалось опубликовать в #{subject}: нет соединения с шиной")
+        return false
+      end
+
+      client.publish(subject, payload)
+      client.flush(2) # убедиться, что ответ ушёл в шину, а не остался в очереди
+      true
+    rescue StandardError => e
+      log_bus("не удалось опубликовать в #{subject} " \
+              "(#{e.class}: #{e.message})")
+      false
     end
 
     private
@@ -101,8 +136,8 @@ module SigmaMate
         log_bus("соединение с шиной потеряно" \
                  "#{" (#{error.class}: #{error.message})" if error && error.message}")
       end
-      nc.subscribe(@agent_id) { |msg| show_message(msg) }
-      log_bus("подписка на очередь #{@agent_id} поднята (#{@url})")
+      nc.subscribe(@subject) { |msg| dispatch(msg) }
+      log_bus("подписка на очередь #{@subject} поднята (#{@url})")
 
       until @mutex.synchronize { @stop } || nc.closed?
         sleep POLL_INTERVAL
@@ -112,13 +147,21 @@ module SigmaMate
       close_client(nc)
     end
 
+    # Входящее сообщение: честно показать его в журнале (subject, размер,
+    # payload) и отдать handler-у. Handler работает в потоке читателя
+    # шины и должен возвращаться быстро: пока он занят, новые сообщения
+    # не принимаются.
+    def dispatch(msg)
+      show_message(msg)
+      @handler&.call(msg)
+    end
+
     # Журнал: показать входящее сообщение целиком - subject очереди,
-    # reply-адрес при наличии, размер и payload.
+    # размер и payload.
     def show_message(msg)
       data = msg.data.to_s.dup.force_encoding(Encoding::UTF_8).scrub
-      reply = msg.reply ? ", reply=#{msg.reply}" : ""
-      log_bus("#{@agent_id} <- входящее сообщение " \
-              "(#{data.bytesize} байт#{reply}): #{data}")
+      log_bus("#{@subject} <- входящее сообщение " \
+              "(#{data.bytesize} байт): #{data}")
     end
 
     # Пауза между попытками подключения, прерываемая остановкой.

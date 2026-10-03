@@ -1,5 +1,5 @@
 ---
-model: opencode-go/glm-5.3
+model: glm/glm-5.3
 ---
 
 # Task agent

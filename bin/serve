@@ -5,12 +5,14 @@
 # обслуживает POST /ask {"prompt": "..."} -> ответ агента в ответе того же
 # запроса. Новый запрос прерывает текущий прогон.
 #
-# Дополнительно слушает шину NATS: при запуске передаётся идентификатор
-# агента (--agent-id или SM_AGENT_ID) и адрес шины (--nats-url или
-# SM_NATS_URL); сервис слушает очередь своего идентификатора и печатает
-# входящие сообщения в свой вывод. Без идентификатора подписка не
-# поднимается. HTTP-адрес и порт: --host/--port или SM_HOST/SM_PORT
-# (по умолчанию 127.0.0.1:4567).
+# Дополнительно слушает шину NATS по протоколу sigma/1 (doc-3): при запуске
+# передаётся идентификатор агента (--agent-id или SM_AGENT_ID) и адрес шины
+# (--nats-url или SM_NATS_URL); сервис подписан на свой inbox - тему
+# sigma.agent.<id>.inbox, выполняет задачу из конверта в той же сессии,
+# что и HTTP, и публикует ответ событием в свой канал
+# sigma.agent.<id>.events с correlation_id исходного запроса. Без
+# идентификатора подписка не поднимается. HTTP-адрес и порт:
+# --host/--port или SM_HOST/SM_PORT (по умолчанию 127.0.0.1:4567).
 
 require "rubygems"
 require "bundler/setup"
@@ -19,6 +21,7 @@ require_relative "../lib/sigma_mate"
 require_relative "../lib/sigma_mate/coordinator"
 require_relative "../lib/sigma_mate/service"
 require_relative "../lib/sigma_mate/bus"
+require_relative "../lib/sigma_mate/agent_protocol"
 
 module SigmaMate
   EXIT_OK = 0
@@ -33,6 +36,9 @@ module SigmaMate
       "(по умолчанию #{DEFAULT_HOST}:#{DEFAULT_PORT})\n" \
       "Идентификатор агента: --agent-id или SM_AGENT_ID; " \
       "адрес шины NATS: --nats-url или SM_NATS_URL\n" \
+      "Идентификатор без точек, пробелов и символов * и >: " \
+      "темы sigma.agent.<идентификатор>.inbox и .events собираются " \
+      "из него дословно\n" \
       "Без идентификатора агента или адреса шины подписка на шину " \
       "не поднимается, HTTP-API продолжает работать"
   end
@@ -68,13 +74,20 @@ module SigmaMate
     exit EXIT_FAILURE
   end
 
-  # Поднимает слушателя шины или печатает ошибку и возвращает nil -
-  # без идентификатора агента или адреса шины подписка не поднимается.
+  # Поднимает слушателя шины с протоколом или печатает ошибку и
+  # возвращает nil - без идентификатора агента, при недопустимом
+  # идентификаторе или без адреса шины подписка не поднимается.
   # @return [BusListener, nil]
-  def build_bus(agent_id, nats_url)
+  def build_bus(agent_id, nats_url, coordinator)
     if agent_id.nil? || agent_id.strip.empty?
       warn "Ошибка: идентификатор агента не задан (--agent-id или " \
            "SM_AGENT_ID); подписка на шину не поднимается."
+      return nil
+    end
+    unless Protocol.valid_agent_id?(agent_id)
+      warn "Ошибка: недопустимый идентификатор агента #{agent_id.inspect}: " \
+           "запрещены точки, пробелы и символы * и >; " \
+           "подписка на шину не поднимается."
       return nil
     end
     if nats_url.nil? || nats_url.strip.empty?
@@ -84,7 +97,11 @@ module SigmaMate
       return nil
     end
 
-    BusListener.new(url: nats_url, agent_id: agent_id).start
+    listener = BusListener.new(url: nats_url, agent_id: agent_id)
+    listener.handler = AgentProtocol.new(agent_id: agent_id,
+                                         coordinator: coordinator,
+                                         publisher: listener)
+    listener.start
   end
 
   def run(argv)
@@ -97,7 +114,7 @@ module SigmaMate
       warn "Сервис продолжит работать и будет отвечать ошибкой 503 на запросы."
     end
 
-    bus = build_bus(opts[:agent_id], opts[:nats_url])
+    bus = build_bus(opts[:agent_id], opts[:nats_url], coordinator)
     service = Service.new(coordinator: coordinator, host: opts[:host], port: opts[:port])
 
     %w[INT TERM].each do |sig|
@@ -109,6 +126,7 @@ module SigmaMate
     $stdout.flush
 
     service.start
+    bus&.handler&.shutdown
     bus&.stop
     coordinator.close
     EXIT_OK
